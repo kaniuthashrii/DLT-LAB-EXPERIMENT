@@ -1,0 +1,96 @@
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, LSTM, Embedding, Dense
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+# ===== 1. Data ===== #
+input_texts = ['hello', 'how are you', 'what is your name', 'bye']
+target_texts = ['hi', 'i am fine', 'i am a bot', 'goodbye']
+target_texts = ['<start> ' + text + ' <end>' for text in target_texts]
+
+tokenizer = Tokenizer(filters='')
+tokenizer.fit_on_texts(input_texts + target_texts)
+
+input_sequences = tokenizer.texts_to_sequences(input_texts)
+target_sequences = tokenizer.texts_to_sequences(target_texts)
+
+max_input_len = max(len(seq) for seq in input_sequences)
+max_target_len = max(len(seq) for seq in target_sequences)
+vocab_size = len(tokenizer.word_index) + 1
+
+encoder_input_data = pad_sequences(input_sequences, maxlen=max_input_len, padding='post')
+decoder_input_data = pad_sequences(target_sequences, maxlen=max_target_len, padding='post')
+
+decoder_target_data = np.zeros((len(input_texts), max_target_len, vocab_size), dtype='float32')
+for i, seq in enumerate(target_sequences):
+    for t, word_id in enumerate(seq[1:]):
+        decoder_target_data[i, t, word_id] = 1.0
+
+# ===== 2. Model ===== #
+embedding_dim = 64
+latent_dim = 128
+
+# Encoder
+encoder_inputs = Input(shape=(None,))
+enc_emb = Embedding(vocab_size, embedding_dim)(encoder_inputs)
+_, state_h, state_c = LSTM(latent_dim, return_state=True)(enc_emb)
+encoder_states = [state_h, state_c]
+
+# Decoder
+decoder_inputs = Input(shape=(None,))
+dec_emb = Embedding(vocab_size, embedding_dim)(decoder_inputs)
+decoder_lstm = LSTM(latent_dim, return_sequences=True, return_state=True)
+decoder_outputs, _, _ = decoder_lstm(dec_emb, initial_state=encoder_states)
+decoder_dense = Dense(vocab_size, activation='softmax')
+decoder_outputs = decoder_dense(decoder_outputs)
+
+# Compile and train
+model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
+model.compile(optimizer='adam', loss='categorical_crossentropy')
+model.fit([encoder_input_data, decoder_input_data], decoder_target_data, batch_size=2, epochs=300, verbose=0)
+
+# ===== 3. Inference Models ===== #
+# Encoder inference
+encoder_model = Model(encoder_inputs, encoder_states)
+
+# Decoder inference
+decoder_state_input_h = Input(shape=(latent_dim,))
+decoder_state_input_c = Input(shape=(latent_dim,))
+decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+
+dec_emb2 = Embedding(vocab_size, embedding_dim)(decoder_inputs)
+decoder_outputs2, state_h2, state_c2 = decoder_lstm(dec_emb2, initial_state=decoder_states_inputs)
+decoder_outputs2 = decoder_dense(decoder_outputs2)
+decoder_states2 = [state_h2, state_c2]
+
+decoder_model = Model([decoder_inputs] + decoder_states_inputs, [decoder_outputs2] + decoder_states2)
+
+# ===== 4. Generate Response ===== #
+def decode_sequence(input_seq):
+    states_value = encoder_model.predict(input_seq, verbose=0)
+    target_seq = np.array([[tokenizer.word_index['<start>']]])
+    decoded_sentence = ''
+
+    for _ in range(max_target_len):
+        output_tokens, h, c = decoder_model.predict([target_seq] + states_value, verbose=0)
+        sampled_token_index = np.argmax(output_tokens[0, -1, :])
+        sampled_word = tokenizer.index_word.get(sampled_token_index, '')
+
+        if sampled_word == '<end>' or sampled_word == '':
+            break
+
+        decoded_sentence += sampled_word + ' '
+        target_seq = np.array([[sampled_token_index]])
+        states_value = [h, c]
+
+    return decoded_sentence.strip()
+
+# ===== 5. Test ===== #
+test_input = "how are you"
+test_seq = tokenizer.texts_to_sequences([test_input])
+test_seq = pad_sequences(test_seq, maxlen=max_input_len, padding='post')
+
+print("Input:", test_input)
+print("Bot  :", decode_sequence(test_seq))
